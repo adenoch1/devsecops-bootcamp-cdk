@@ -31,6 +31,8 @@ class LoggingStack(Stack):
             description="KMS key for S3 server access logs / sink buckets (SSE-KMS)",
             enable_key_rotation=True,
             alias=f"{config.NAME_PREFIX}-alb-logs",
+            removal_policy=RemovalPolicy.DESTROY,
+            pending_window=Duration.days(7),
         )
 
         self.cloudwatch_logs_key = kms.Key(
@@ -38,6 +40,8 @@ class LoggingStack(Stack):
             description="KMS key for CloudWatch Logs encryption",
             enable_key_rotation=True,
             alias=f"{config.NAME_PREFIX}-cloudwatch-logs",
+            removal_policy=RemovalPolicy.DESTROY,
+            pending_window=Duration.days(7),
         )
 
         # ---- S3 bucket chain (terminal sink first) ----

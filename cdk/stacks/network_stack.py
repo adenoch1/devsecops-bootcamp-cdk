@@ -9,6 +9,7 @@ group.
 
 from aws_cdk import (
     Stack,
+    RemovalPolicy,
     aws_ec2 as ec2,
     aws_logs as logs,
     aws_kms as kms,
@@ -35,6 +36,7 @@ class NetworkStack(Stack):
             log_group_name=f"/vpc/flowlogs/{config.NAME_PREFIX}",
             retention=config.FLOW_LOG_RETENTION,
             encryption_key=cloudwatch_logs_key,
+            removal_policy=RemovalPolicy.DESTROY,
         )
 
         self.vpc = ec2.Vpc(

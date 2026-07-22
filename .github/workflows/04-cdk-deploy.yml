@@ -1,0 +1,192 @@
+name: cdk-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy or destroy"
+        required: true
+        default: "deploy"
+        type: choice
+        options: [deploy, destroy]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cdk-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  CDK_DEFAULT_ACCOUNT: "476532114555"
+  CDK_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+  ACM_CERTIFICATE_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+  ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+
+jobs:
+  #########################################################
+  # Deploy path
+  #########################################################
+  deploy-ecr:
+    if: ${{ inputs.action == 'deploy' }}
+    name: Deploy EcrStack (so an image has somewhere to land)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: cdk/requirements.txt
+
+      - name: Install CDK CLI + Python deps
+        run: |
+          npm install -g aws-cdk
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure AWS credentials (deploy role, via OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEPLOY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: cdk deploy EcrStack
+        run: cdk deploy EcrStack --require-approval never
+
+  build-and-push-image:
+    if: ${{ inputs.action == 'deploy' }}
+    name: Build + push image (ECR)
+    needs: deploy-ecr
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (ECR role, via OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_ECR }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          REPOSITORY: devsecops-flask-dev-cdk-repo
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f docker/Dockerfile -t "$REGISTRY/$REPOSITORY:$IMAGE_TAG" .
+          docker push "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+
+  deploy-app:
+    if: ${{ inputs.action == 'deploy' }}
+    name: Deploy remaining stacks with the real image tag
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: cdk/requirements.txt
+
+      - name: Install CDK CLI + Python deps
+        run: |
+          npm install -g aws-cdk
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure AWS credentials (deploy role, via OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEPLOY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: cdk deploy --all
+        env:
+          CONTAINER_IMAGE_TAG: ${{ github.sha }}
+          GIT_SHA: ${{ github.sha }}
+          APP_ENV: dev
+        run: |
+          export BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cdk deploy --all --require-approval never --outputs-file outputs.json
+
+      - name: Wait for ECS service to become stable
+        run: |
+          set -euo pipefail
+          CLUSTER=$(python -c "import json; print(json.load(open('outputs.json'))['EcsStack']['EcsClusterName'])")
+          SERVICE=$(python -c "import json; print(json.load(open('outputs.json'))['EcsStack']['EcsServiceName'])")
+          echo "Waiting for $CLUSTER/$SERVICE to stabilize..."
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE" --region ${{ secrets.AWS_REGION }}
+
+      - name: Show how to reach it
+        run: |
+          ALB=$(python -c "import json; print(json.load(open('outputs.json'))['EcsStack']['AlbDnsName'])")
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "ALB DNS name: \`$ALB\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The ACM cert is issued for app.clevernews.org, not this ALB's own DNS name," >> "$GITHUB_STEP_SUMMARY"
+          echo "so curl/browser will show a certificate hostname mismatch — expected for this" >> "$GITHUB_STEP_SUMMARY"
+          echo "smoke test (real DNS is not being repointed). Use \`curl -k\`:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "curl -k https://$ALB/health" >> "$GITHUB_STEP_SUMMARY"
+          echo "curl -k https://$ALB/version" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  #########################################################
+  # Destroy path
+  #########################################################
+  destroy:
+    if: ${{ inputs.action == 'destroy' }}
+    name: cdk destroy --all
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: cdk/requirements.txt
+
+      - name: Install CDK CLI + Python deps
+        run: |
+          npm install -g aws-cdk
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure AWS credentials (deploy role, via OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEPLOY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: cdk destroy --all
+        env:
+          CONTAINER_IMAGE_TAG: ${{ github.sha }}
+          GIT_SHA: ${{ github.sha }}
+          APP_ENV: dev
+        run: |
+          export BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cdk destroy --all --force

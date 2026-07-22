@@ -53,6 +53,9 @@ cdk/            The CDK app
   02-security.yml                  Bandit, pip-audit, Trivy fs scan (unchanged)
   03-cdk-synth-security.yml        cdk synth + cdk-nag (the CDK equivalent of
                                    tfsec/Checkov/OPA on the Terraform side)
+  04-cdk-deploy.yml                 manual (workflow_dispatch) deploy/destroy —
+                                   deploy-ecr -> build-and-push-image ->
+                                   deploy-app, or a destroy path
 ```
 
 ## Terraform → CDK mapping
@@ -86,12 +89,39 @@ real, structural difference between the two tools, not a shortcut.
   bootstrap-only SNS topic): CDK bootstraps itself (`cdk bootstrap`) and has
   no equivalent need for a hand-rolled state backend. `ObservabilityStack`
   creates its own SNS topic instead of trying to share the Terraform side's.
-- **A deploy pipeline** (`cdk deploy` wired into CI, mirroring
-  `terraform-release.yml`'s build-image → deploy → health-check flow):
-  not built yet. Today, `03-cdk-synth-security.yml` only runs `cdk synth`
-  on pull requests — there's no release workflow that actually deploys.
-  This is the single largest gap versus the Terraform sibling. AWS access
-  (below) is wired up and ready for when that workflow gets built.
+- **An automatic, push-triggered deploy pipeline** (mirroring
+  `terraform-release.yml`'s trigger-on-push-to-main): not built.
+  `04-cdk-deploy.yml` deploys/destroys, but only via manual
+  `workflow_dispatch` — it does not run on every push to `main`. Turning
+  it into a real continuous pipeline (plus a GitHub Environment approval
+  gate, matching the Terraform sibling's `dev`/`dns`/`destroy` environments)
+  is a reasonable next step once this has been exercised a few times
+  manually.
+
+## Deploying it (manually, for real)
+
+`04-cdk-deploy.yml`, triggered via the Actions tab (`workflow_dispatch`,
+choose `deploy` or `destroy`):
+
+1. **`deploy-ecr`** — `cdk deploy EcrStack` only, so there's a repository for
+   an image to land in before anything else happens.
+2. **`build-and-push-image`** — builds `docker/Dockerfile` and pushes it to
+   that repo, tagged with the commit SHA (using `github-ecr-role`, shared
+   with the Terraform sibling).
+3. **`deploy-app`** — `cdk deploy --all` with `CONTAINER_IMAGE_TAG` set to
+   that same SHA, so the ECS task definition references an image that
+   actually exists. Waits for the ECS service to stabilize, then prints the
+   ALB's DNS name and a `curl -k` command to the job summary.
+4. **`destroy`** (separate path, `action: destroy`) — `cdk destroy --all`.
+
+Note on the ACM certificate: this reuses the Terraform sibling's certificate
+(`app.clevernews.org`) purely for TLS termination — real DNS is **not**
+repointed at this stack's ALB. Verifying the deployed app means hitting the
+ALB's own AWS-assigned DNS name directly over HTTPS, which will show a
+certificate hostname mismatch (expected — bypass it with `curl -k` or an
+"advanced/proceed" click in a browser). This is fine for a short-lived
+deploy → verify → destroy cycle; it would need a real certificate/DNS entry
+for anything longer-lived.
 
 ## AWS access for CI/CD
 
