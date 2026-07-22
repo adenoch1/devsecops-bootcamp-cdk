@@ -253,7 +253,6 @@ class EcsStack(Stack):
             encryption_key=waf_s3_key,
             enforce_ssl=True,
             removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
             lifecycle_rules=[
                 s3.LifecycleRule(
                     abort_incomplete_multipart_upload_after=Duration.days(7),
@@ -271,7 +270,6 @@ class EcsStack(Stack):
             encryption_key=waf_s3_key,
             enforce_ssl=True,
             removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
             server_access_logs_bucket=waf_logs_access_bucket,
             server_access_logs_prefix="access-logs/",
             lifecycle_rules=[
@@ -290,6 +288,7 @@ class EcsStack(Stack):
 
         firehose_role = iam.Role(
             self, "FirehoseWafRole",
+            role_name=f"{config.NAME_PREFIX}-firehose-waf",
             assumed_by=iam.ServicePrincipal("firehose.amazonaws.com"),
         )
         # Scoped to exactly what Firehose's S3 destination needs (matches the
