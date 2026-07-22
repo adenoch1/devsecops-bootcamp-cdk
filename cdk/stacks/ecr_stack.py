@@ -7,6 +7,7 @@ A single KMS-encrypted, immutable-tag ECR repository with scan-on-push.
 from aws_cdk import (
     Stack,
     RemovalPolicy,
+    Duration,
     aws_ecr as ecr,
     aws_kms as kms,
 )
@@ -24,6 +25,8 @@ class EcrStack(Stack):
             description=f"KMS key for {config.NAME_PREFIX} ECR repository",
             enable_key_rotation=True,
             alias=f"{config.NAME_PREFIX}-ecr",
+            removal_policy=RemovalPolicy.DESTROY,
+            pending_window=Duration.days(7),
         )
 
         self.repository = ecr.Repository(

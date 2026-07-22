@@ -24,6 +24,7 @@ from aws_cdk import (
     Stack,
     Duration,
     RemovalPolicy,
+    CfnOutput,
     aws_ec2 as ec2,
     aws_ecs as ecs,
     aws_elasticloadbalancingv2 as elbv2,
@@ -95,6 +96,7 @@ class EcsStack(Stack):
             log_group_name=f"/ecs/{config.NAME_PREFIX}",
             retention=config.LOG_RETENTION,
             encryption_key=cloudwatch_logs_key,
+            removal_policy=RemovalPolicy.DESTROY,
         )
 
         # ---- Security groups ----
@@ -232,6 +234,8 @@ class EcsStack(Stack):
             description="KMS CMK for S3 logging buckets (WAF logs + access logs)",
             enable_key_rotation=True,
             alias=f"{config.NAME_PREFIX}-s3-waf-logs",
+            removal_policy=RemovalPolicy.DESTROY,
+            pending_window=Duration.days(7),
         )
         # Firehose's own service principal needs key access for stream-level
         # SSE (DeliveryStreamEncryptionConfigurationInput below), separate
@@ -463,3 +467,10 @@ class EcsStack(Stack):
                 ),
             ],
         )
+
+        # ---- Outputs (consumed by the deploy workflow's health check) ----
+
+        CfnOutput(self, "AlbDnsName", value=self.alb.load_balancer_dns_name)
+        CfnOutput(self, "EcsClusterName", value=self.cluster.cluster_name)
+        CfnOutput(self, "EcsServiceName", value=self.service.service_name)
+        CfnOutput(self, "AlbTargetGroupArn", value=self.target_group.target_group_arn)
