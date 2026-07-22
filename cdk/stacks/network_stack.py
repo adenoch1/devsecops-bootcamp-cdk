@@ -12,6 +12,7 @@ from aws_cdk import (
     aws_ec2 as ec2,
     aws_logs as logs,
     aws_kms as kms,
+    aws_iam as iam,
 )
 from constructs import Construct
 
@@ -49,12 +50,23 @@ class NetworkStack(Stack):
                     name="private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24
                 ),
             ],
-            flow_logs={
-                "to-cloudwatch": ec2.FlowLogOptions(
-                    destination=ec2.FlowLogDestination.to_cloud_watch_logs(flow_log_group),
-                    traffic_type=ec2.FlowLogTrafficType.ALL,
-                )
-            },
+        )
+
+        # Explicit, named role (rather than the Vpc(flow_logs=...) shorthand,
+        # which lets CloudFormation auto-generate an unpredictable role name)
+        # so the GitHub Actions deploy role's IAM permissions can be scoped
+        # to an exact resource ARN instead of a wildcard.
+        flow_log_role = iam.Role(
+            self, "VpcFlowLogsRole",
+            role_name=f"{config.NAME_PREFIX}-vpc-flowlogs-role",
+            assumed_by=iam.ServicePrincipal("vpc-flow-logs.amazonaws.com"),
+        )
+
+        ec2.FlowLog(
+            self, "VpcFlowLog",
+            resource_type=ec2.FlowLogResourceType.from_vpc(self.vpc),
+            destination=ec2.FlowLogDestination.to_cloud_watch_logs(flow_log_group, flow_log_role),
+            traffic_type=ec2.FlowLogTrafficType.ALL,
         )
 
         # NOTE: the Terraform sibling also locks down the VPC's default

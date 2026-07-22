@@ -53,7 +53,6 @@ class LoggingStack(Stack):
             bucket_key_enabled=True,
             enforce_ssl=True,
             removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
             lifecycle_rules=[
                 s3.LifecycleRule(
                     abort_incomplete_multipart_upload_after=Duration.days(7),
@@ -81,7 +80,6 @@ class LoggingStack(Stack):
             bucket_key_enabled=True,
             enforce_ssl=True,
             removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
             server_access_logs_bucket=self.ultimate_sink_bucket,
             server_access_logs_prefix="server-access-logs/",
             lifecycle_rules=[
@@ -110,7 +108,6 @@ class LoggingStack(Stack):
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
             removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
             server_access_logs_bucket=self.server_access_logs_bucket,
             server_access_logs_prefix="alb-logs/",
             lifecycle_rules=[

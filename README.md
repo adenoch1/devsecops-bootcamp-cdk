@@ -86,14 +86,61 @@ real, structural difference between the two tools, not a shortcut.
   bootstrap-only SNS topic): CDK bootstraps itself (`cdk bootstrap`) and has
   no equivalent need for a hand-rolled state backend. `ObservabilityStack`
   creates its own SNS topic instead of trying to share the Terraform side's.
-- **GitHub OIDC role for CI**: it isn't in the Terraform repo either — it
-  was created out-of-band there too. Whoever deploys this needs to create
-  one (or reuse an existing one) and wire its ARN into repo secrets.
 - **A deploy pipeline** (`cdk deploy` wired into CI, mirroring
   `terraform-release.yml`'s build-image → deploy → health-check flow):
   not built yet. Today, `03-cdk-synth-security.yml` only runs `cdk synth`
   on pull requests — there's no release workflow that actually deploys.
-  This is the single largest gap versus the Terraform sibling.
+  This is the single largest gap versus the Terraform sibling. AWS access
+  (below) is wired up and ready for when that workflow gets built.
+
+## AWS access for CI/CD
+
+Unlike the Terraform sibling's roles (which are tightly coupled to
+Terraform's own S3+DynamoDB state mechanics and have zero CloudFormation
+permissions), this repo has its own purpose-built setup:
+
+- **`GitHubActions-CDK-DevSecOps-Role`** — the only role GitHub Actions
+  assumes directly (via OIDC, trust scoped to
+  `repo:adenoch1/devsecops-bootcamp-cdk`'s `main` branch and pull requests).
+  Its *only* permission is `sts:AssumeRole` on the 4 roles `cdk bootstrap`
+  creates (deploy, lookup, file-publishing, image-publishing) — it has no
+  direct AWS permissions of its own.
+- **`cdk bootstrap`** was run with `--trust` pointing at that role and
+  `--cloudformation-execution-policies` pointing at a **custom managed
+  policy** (`CDK-DevSecOps-CfnExec-Policy`), not CDK's `AdministratorAccess`
+  default. That policy is scoped to exactly what these stacks provision
+  (VPC/ECS/ALB/WAF/Firehose/KMS/S3/ECR/CloudWatch/SNS/CloudFormation), and
+  IAM role creation/`PassRole` is scoped to the `devsecops-flask-dev-cdk-*`
+  name prefix only.
+- **`github-ecr-role`** (shared with the Terraform sibling, reused as-is —
+  no changes) already trusts any `adenoch1/*` repo and has generic ECR
+  push/pull permissions, so it needed no modification.
+- Repo secrets: `AWS_REGION`, `AWS_ROLE_ARN_DEPLOY`, `AWS_ROLE_ARN_ECR`.
+
+### Why every IAM role here has an explicit name
+
+This scoping only works because every role the CDK stacks create has a
+predictable `role_name=...` (matching the Terraform sibling's naming
+convention) instead of letting CloudFormation auto-generate one. Two CDK
+convenience features were turned off specifically to avoid needing
+unpredictably-named helper roles in the execution policy:
+
+- `auto_delete_objects=True` on S3 buckets (removed) — CDK implements this
+  via a framework-managed Lambda + auto-generated role. Buckets still get
+  `RemovalPolicy.DESTROY`, but `cdk destroy` will fail on non-empty buckets
+  until they're emptied manually. Matches the same "protect logs from
+  accidental deletion" caution the Terraform tfvars already applies via
+  `logs_bucket_force_destroy = false`.
+- `@aws-cdk/aws-ec2:restrictDefaultSecurityGroup` (disabled in `cdk.json`) —
+  CDK can auto-lock-down the VPC's default security group via another
+  framework-managed custom resource. Disabling it means the default-SG gap
+  noted below is real, not just theoretical.
+
+The alternative — granting broad `iam:CreateRole`/`PutRolePolicy` plus
+`iam:PassRole` to Lambda plus `lambda:CreateFunction`/`InvokeFunction` so
+CDK's internal helpers could deploy — is a well-known AWS privilege-
+escalation combination (create a role, attach admin, pass it to a new
+Lambda, invoke it). Not worth it for two convenience features.
 
 ### Known gaps versus the Terraform sibling
 
