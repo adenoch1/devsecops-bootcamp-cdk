@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Delivery Platform — DevSecOps Bootcamp (CDK Edition)</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+
+<header class="site-header">
+    <h1>Secure Delivery Platform <span class="status-badge" style="background:#e0e7ff;color:#3730a3;">CDK Edition</span></h1>
+    <p class="tagline">A production-style DevSecOps reference implementation on AWS —
+        built and maintained by Enoch Adekanye</p>
+</header>
+
+<main>
+
+    <section class="content-section">
+        <h2>This Deployment <span class="status-badge">Live</span></h2>
+        <p class="muted">Every release is traceable from commit to running container.
+            This metadata is injected by the CI/CD pipeline at build time.</p>
+        <table class="build-table">
+            <tr><th>Service</th><td>{{ build.service }}</td></tr>
+            <tr><th>Environment</th><td>{{ build.environment }}</td></tr>
+            <tr><th>Git commit</th><td><code>{{ build.git_sha }}</code></td></tr>
+            <tr><th>Image tag</th><td><code>{{ build.image_tag }}</code></td></tr>
+            <tr><th>Built at</th><td>{{ build.built_at }}</td></tr>
+        </table>
+        <p class="muted">API: <code>GET /health</code> · <code>GET /version</code></p>
+    </section>
+
+    <section class="content-section">
+        <h2>How This Service Ships</h2>
+        <ul class="pipeline-list">
+            <li><strong>CI gates:</strong> pytest · Bandit (SAST) · pip-audit (SCA) · Trivy (container scan)</li>
+            <li><strong>Infrastructure as Code:</strong> AWS CDK (Python) — network, IAM, ECR, ECS, logging stacks</li>
+            <li><strong>Policy as Code:</strong> cdk-nag (AwsSolutions pack) on every CDK synth</li>
+            <li><strong>Governance:</strong> protected main, PR reviews, approval-gated releases</li>
+            <li><strong>Runtime:</strong> ECS Fargate · ALB with ACM TLS · CloudWatch observability</li>
+        </ul>
+    </section>
+
+    <section class="content-section">
+        <h2>Project</h2>
+        <p>This application exists to demonstrate a secure software delivery lifecycle
+            end-to-end, implemented twice — once in Terraform, once in AWS CDK — so both
+            approaches can be compared directly. The full source, pipelines, and stack code
+            are public.</p>
+        <p>
+            <a class="btn" href="https://github.com/adenoch1/devsecops-bootcamp-cdk" rel="noopener">This repo (CDK)</a>
+            &nbsp;
+            <a class="btn" href="https://github.com/adenoch1/devsecops-bootcamp" rel="noopener">Terraform sibling</a>
+        </p>
+    </section>
+
+</main>
+
+<footer class="site-footer">
+    <p>© 2026 Enoch Adekanye — DevSecOps Bootcamp (CDK Edition)</p>
+</footer>
+
+</body>
+</html>
