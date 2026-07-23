@@ -3,9 +3,6 @@ name: CDK Synth + Security (cdk-nag)
 on:
   pull_request:
     branches: ["main"]
-    paths:
-      - "cdk/**"
-      - ".github/workflows/03-cdk-synth-security.yml"
 
 permissions:
   contents: read
