@@ -104,7 +104,7 @@ class EcsStack(Stack):
         self.alb_sg = ec2.SecurityGroup(
             self, "AlbSg",
             vpc=vpc,
-            description="ALB security group — HTTPS from anywhere",
+            description="ALB security group - HTTPS from anywhere",
             allow_all_outbound=False,
         )
         self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(443))
@@ -125,7 +125,7 @@ class EcsStack(Stack):
         self.ecs_sg = ec2.SecurityGroup(
             self, "EcsTasksSg",
             vpc=vpc,
-            description="ECS tasks security group — app port from ALB only",
+            description="ECS tasks security group - app port from ALB only",
             allow_all_outbound=False,
         )
         self.ecs_sg.add_ingress_rule(
