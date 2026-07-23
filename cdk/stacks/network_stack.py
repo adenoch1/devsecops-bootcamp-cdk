@@ -79,3 +79,49 @@ class NetworkStack(Stack):
         # workload in this stack gets its own purpose-built SG in EcsStack,
         # so the default SG being permissive is unused rather than unsafe,
         # but it's a real gap relative to the Terraform side worth closing.
+
+        # ---- VPC Endpoints (Week 5 Stage 2) ----
+        # Keeps ECS task traffic to AWS services off the NAT/public path.
+        # Terraform equivalent: infra/modules/network/endpoints.tf — same
+        # honest cost note applies (this likely costs as much or more per
+        # month than the single NAT gateway it doesn't replace, at this
+        # scale; it's a security-posture improvement, not a cost win).
+        #
+        # Security group scoped to the VPC CIDR rather than EcsStack's task
+        # SG: that SG lives in EcsStack, which depends on this stack's VPC
+        # output, so scoping to it here would invert the dependency.
+        endpoints_sg = ec2.SecurityGroup(
+            self, "VpcEndpointsSg",
+            vpc=self.vpc,
+            description="Interface VPC endpoints - HTTPS from within the VPC only",
+            allow_all_outbound=False,
+        )
+        endpoints_sg.add_ingress_rule(ec2.Peer.ipv4(config.VPC_CIDR), ec2.Port.tcp(443))
+        endpoints_sg.add_egress_rule(ec2.Peer.ipv4(config.VPC_CIDR), ec2.Port.all_traffic())
+
+        # Gateway endpoint for S3 (free) — ECR image layers are actually
+        # fetched from S3 under the hood, so this covers image pulls too.
+        self.vpc.add_gateway_endpoint(
+            "S3Endpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+        )
+
+        for endpoint_id, service in {
+            "EcrApiEndpoint": ec2.InterfaceVpcEndpointAwsService.ECR,
+            "EcrDkrEndpoint": ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+            "LogsEndpoint": ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+        }.items():
+            self.vpc.add_interface_endpoint(
+                endpoint_id,
+                service=service,
+                subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+                security_groups=[endpoints_sg],
+                private_dns_enabled=True,
+                # Without this, CDK adds its own default "allow from VPC
+                # CIDR" ingress rule on top of endpoints_sg's explicit one
+                # (using an Fn::GetAtt Vpc.CidrBlock reference rather than
+                # the literal CIDR string) — functionally redundant, and it
+                # crashes cdk-nag's EC23 check, which can't statically
+                # analyze a non-primitive CIDR value.
+                open=False,
+            )
