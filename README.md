@@ -56,7 +56,19 @@ cdk/            The CDK app
   04-cdk-deploy.yml                 manual (workflow_dispatch) deploy/destroy —
                                    deploy-ecr -> build-and-push-image ->
                                    deploy-app, or a destroy path
+weeks/          Week-by-week docs (architecture diagrams, what changed and
+                why), mirroring the Terraform sibling's weeks/ folder —
+                started at Week 5; earlier work predates this repo's
+                week-by-week documentation convention
 ```
+
+## Weekly progress
+
+Same weekly structure as the Terraform sibling, ported stage by stage
+after each lands there. Start with whichever week you're studying:
+
+- `weeks/week-05-progressive-delivery/README.md` — rollback parity, VPC
+  endpoints (with an architecture diagram), X-Ray, CodeDeploy Blue/Green
 
 ## Terraform → CDK mapping
 
