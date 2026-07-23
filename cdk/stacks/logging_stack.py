@@ -13,6 +13,7 @@ from aws_cdk import (
     RemovalPolicy,
     aws_kms as kms,
     aws_s3 as s3,
+    aws_iam as iam,
     Duration,
 )
 from constructs import Construct
@@ -42,6 +43,27 @@ class LoggingStack(Stack):
             alias=f"{config.NAME_PREFIX}-cloudwatch-logs",
             removal_policy=RemovalPolicy.DESTROY,
             pending_window=Duration.days(7),
+        )
+        # CloudWatch Logs won't use a CMK to encrypt a log group unless the
+        # key's own policy explicitly allows the regional logs service
+        # principal — the default kms.Key() policy only grants the account
+        # root. Matches the Terraform sibling's cloudwatch_logs key policy
+        # ("AllowCloudWatchLogsUse" statement).
+        self.cloudwatch_logs_key.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowCloudWatchLogsUse",
+                effect=iam.Effect.ALLOW,
+                principals=[iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")],
+                actions=[
+                    "kms:Encrypt",
+                    "kms:Decrypt",
+                    "kms:ReEncrypt*",
+                    "kms:GenerateDataKey*",
+                    "kms:DescribeKey",
+                ],
+                resources=["*"],
+                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+            )
         )
 
         # ---- S3 bucket chain (terminal sink first) ----
