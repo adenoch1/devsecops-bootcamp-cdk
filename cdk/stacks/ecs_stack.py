@@ -81,12 +81,31 @@ class EcsStack(Stack):
         # Resource: '*') is suppressed near the end of __init__ instead — it
         # doesn't exist as a construct until add_container()'s grants run.
 
-        # Intentionally empty — placeholder for future app permissions, same
-        # as aws_iam_role.ecs_task_role in the Terraform sibling.
         self.ecs_task_role = iam.Role(
             self, "EcsTaskRole",
             role_name=f"{config.NAME_PREFIX}-ecs-task-role",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+        )
+
+        # Least-privilege equivalent of the AWSXRayDaemonWriteAccess managed
+        # policy — only what the daemon sidecar actually calls: segment/
+        # telemetry writes, plus sampling-rule reads (the SDK polls these to
+        # decide what to trace; without read access it silently falls back
+        # to its built-in default rule, so this isn't strictly required, but
+        # denying it would spam CloudWatch with quiet AccessDenied noise on
+        # every poll interval). Matches the Terraform sibling's xray_write
+        # policy document exactly.
+        self.ecs_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                    "xray:GetSamplingRules",
+                    "xray:GetSamplingTargets",
+                    "xray:GetSamplingStatisticSummaries",
+                ],
+                resources=["*"],  # X-Ray API actions do not support resource-level scoping
+            )
         )
 
         # ---- CloudWatch Logs (app container) ----
@@ -383,6 +402,25 @@ class EcsStack(Stack):
         # this Fargate-safe (no EFS) volume instead.
         self.task_definition.add_volume(name="tmp")
 
+        # X-Ray daemon sidecar (Week 5 Stage 3). Defined before the app
+        # container so the app can declare a START dependency on it.
+        # essential=False: if the daemon dies, the app keeps serving traffic
+        # instead of the whole task cycling — tracing is an observability
+        # nice-to-have here, not a reason to take an outage.
+        xray_container = self.task_definition.add_container(
+            "xray-daemon",
+            image=ecs.ContainerImage.from_registry("public.ecr.aws/xray/aws-xray-daemon:latest"),
+            essential=False,
+            cpu=32,
+            memory_reservation_mib=256,
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="xray-daemon", log_group=self.app_log_group
+            ),
+        )
+        xray_container.add_port_mappings(
+            ecs.PortMapping(container_port=2000, protocol=ecs.Protocol.UDP)
+        )
+
         container = self.task_definition.add_container(
             "app",
             image=ecs.ContainerImage.from_ecr_repository(
@@ -402,9 +440,15 @@ class EcsStack(Stack):
                 "GUNICORN_CMD_ARGS": "--worker-tmp-dir /tmp",
                 "PYTHONUNBUFFERED": "1",
                 "PYTHONPYCACHEPREFIX": "/tmp/pycache",
+                "AWS_XRAY_DAEMON_ADDRESS": "127.0.0.1:2000",
             },
         )
         container.add_port_mappings(ecs.PortMapping(container_port=config.APP_PORT))
+        container.add_container_dependencies(
+            ecs.ContainerDependency(
+                container=xray_container, condition=ecs.ContainerDependencyCondition.START
+            )
+        )
         NagSuppressions.add_resource_suppressions(
             self.task_definition,
             [
@@ -445,25 +489,26 @@ class EcsStack(Stack):
         # Applied last (by exact path, not apply_to_children) so it targets
         # the DefaultPolicy created by the ECR-pull and log-write grants
         # above, which don't exist as constructs until add_container() runs.
-        # KNOWN ISSUE: `cdk synth` still reports this one finding
+        # KNOWN ISSUE: `cdk synth` still reports these findings
         # (AwsSolutions-IAM5 on EcsTaskExecutionRole/DefaultPolicy, caused by
-        # ecr:GetAuthorizationToken requiring Resource: '*' — a hard AWS API
-        # constraint true for every AWS account, not a real over-broad
-        # grant) despite trying all three documented suppression mechanisms:
-        # add_resource_suppressions(apply_to_children=True) called both
-        # before and after the grant existed, add_resource_suppressions_by_
-        # path, and add_stack_suppressions — each attaches correct metadata
-        # (verified in the synthesized template) but cdk-nag 2.38.2's Aspect
-        # still flags it. Kept below as documentation of the accepted,
-        # reviewed risk rather than silently dropped; `cdk synth`'s exit code
-        # 1 for this one line is a known tooling gap, not an unreviewed
-        # security finding.
+        # ecr:GetAuthorizationToken requiring Resource: '*'; and on
+        # EcsTaskRole/DefaultPolicy, caused by the X-Ray write actions above
+        # — both hard AWS API constraints true for every AWS account, not
+        # real over-broad grants) despite trying all three documented
+        # suppression mechanisms: add_resource_suppressions(apply_to_
+        # children=True) called both before and after the grant existed,
+        # add_resource_suppressions_by_path, and add_stack_suppressions —
+        # each attaches correct metadata (verified in the synthesized
+        # template) but cdk-nag 2.38.2's Aspect still flags it. Kept below
+        # as documentation of the accepted, reviewed risk rather than
+        # silently dropped; `cdk synth`'s exit code 1 for these two lines is
+        # a known tooling gap, not an unreviewed security finding.
         NagSuppressions.add_stack_suppressions(
             self,
             [
                 NagPackSuppression(
                     id="AwsSolutions-IAM5",
-                    reason="Only remaining IAM5 source in this stack is ecr:GetAuthorizationToken on the ECS task execution role, which has no resource-level permissions and must be Resource: '*' — the standard, unavoidable shape of that action.",
+                    reason="Two IAM5 sources in this stack, both a required Resource: '*' with no resource-level alternative: ecr:GetAuthorizationToken on the ECS task execution role, and the X-Ray API write/sampling actions (PutTraceSegments/PutTelemetryRecords/GetSamplingRules/GetSamplingTargets/GetSamplingStatisticSummaries) on the ECS task role.",
                 ),
             ],
         )
