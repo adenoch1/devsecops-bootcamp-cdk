@@ -1,5 +1,7 @@
 from flask import Flask, jsonify, render_template
 from werkzeug.exceptions import HTTPException
+from aws_xray_sdk.core import xray_recorder
+from aws_xray_sdk.ext.flask.middleware import XRayMiddleware
 import json
 import logging
 import os
@@ -16,6 +18,17 @@ BUILD_INFO = {
     "image_tag": os.getenv("IMAGE_TAG", "local"),
     "built_at": os.getenv("BUILD_TIME", "unknown"),
 }
+
+# X-Ray daemon runs as a sidecar container in the same ECS task (awsvpc mode
+# shares the network namespace), so 127.0.0.1:2000 reaches it in every real
+# environment. Locally, with no daemon listening, trace segments are just
+# UDP sends into the void — harmless, no crash, no daemon required for dev.
+xray_recorder.configure(
+    service=BUILD_INFO["service"],
+    daemon_address=os.getenv("AWS_XRAY_DAEMON_ADDRESS", "127.0.0.1:2000"),
+    context_missing="LOG_ERROR",
+)
+XRayMiddleware(app, xray_recorder)
 
 
 class JsonLogFormatter(logging.Formatter):

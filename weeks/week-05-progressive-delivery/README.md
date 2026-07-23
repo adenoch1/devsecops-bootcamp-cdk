@@ -62,57 +62,111 @@ graph TB
         end
 
         subgraph Private["Private Subnets (2 AZs)"]
-            ECS["ECS Fargate Tasks<br/>(Flask app)"]
+            App["app container<br/>(Flask, X-Ray SDK)"]
+            XrayD["xray-daemon container<br/>(sidecar, essential=False)"]
         end
 
-        subgraph Endpoints["VPC Endpoints (Week 5 Stage 2)"]
+        subgraph Endpoints["VPC Endpoints (Stage 2 + Stage 3)"]
             S3EP["S3 Gateway Endpoint"]
             EcrApiEP["ECR API<br/>Interface Endpoint"]
             EcrDkrEP["ECR Docker<br/>Interface Endpoint"]
             LogsEP["CloudWatch Logs<br/>Interface Endpoint"]
+            XrayEP["X-Ray<br/>Interface Endpoint"]
         end
     end
 
     S3[("S3<br/>(image layers)")]
     ECR[("ECR<br/>(container registry)")]
     CWLogs[("CloudWatch Logs")]
-    Other[("Everything else<br/>(KMS, SNS, X-Ray...)")]
+    XrayAPI[("X-Ray API<br/>(traces, service map)")]
+    Other[("Everything else<br/>(KMS, SNS...)")]
 
     Client -->|"HTTPS 443"| IGW
     IGW --> ALB
-    ALB -->|"app port"| ECS
+    ALB -->|"app port"| App
 
-    ECS --> EcrApiEP --> ECR
-    ECS --> EcrDkrEP --> ECR
-    ECS -.->|"image layer data"| S3EP -.-> S3
-    ECS --> LogsEP --> CWLogs
-    ECS -.->|"anything not covered<br/>by an endpoint"| NAT -.-> IGW -.-> Other
+    App -.->|"UDP 2000<br/>(same task,<br/>shared network ns)"| XrayD
+
+    App --> EcrApiEP --> ECR
+    App --> EcrDkrEP --> ECR
+    App -.->|"image layer data"| S3EP -.-> S3
+    App --> LogsEP --> CWLogs
+    XrayD --> XrayEP --> XrayAPI
+    App -.->|"anything not covered<br/>by an endpoint"| NAT -.-> IGW -.-> Other
 
     style Endpoints fill:#e0e7ff,stroke:#3730a3
     style NAT fill:#fef3c7,stroke:#b45309
+    style XrayD fill:#dcfce7,stroke:#15803d
 ```
 
 Solid arrows: traffic that now stays inside the VPC via an endpoint.
 Dashed arrows: traffic that still goes out through the NAT gateway
-(anything not covered by one of the 3 interface endpoints or the S3
-gateway endpoint yet).
+(anything not covered by one of the 4 interface endpoints or the S3
+gateway endpoint), or the app-to-daemon UDP link, which never leaves the
+task's own network namespace at all.
 
-What Was Achieved in Week 5 (Stages 1–2)
+Stage 3 — APM / Distributed Tracing via AWS X-Ray
+
+What changed: three pieces, wired together.
+
+1. `app/app.py` (independent copy from the Terraform sibling's — this
+   exact change was applied twice, once per repo) — `aws-xray-sdk` added
+   to `requirements.txt`; `XRayMiddleware` wraps the Flask app, recording
+   a segment for every request via `xray_recorder.configure(daemon_address=...,
+   context_missing="LOG_ERROR")`. `LOG_ERROR` instead of the SDK's default
+   (which raises) so a missing trace context — a local run with no daemon,
+   a background thread — logs a warning instead of crashing a request.
+2. `cdk/stacks/ecs_stack.py` — `TaskDefinition.add_container` gains a
+   second container, `xray-daemon` (`public.ecr.aws/xray/aws-xray-daemon`,
+   UDP 2000, `essential=False`). The `app` container gets
+   `add_container_dependencies(ContainerDependency(container=xray_container,
+   condition=START))` so it doesn't start racing the daemon, plus an
+   `AWS_XRAY_DAEMON_ADDRESS=127.0.0.1:2000` env var — `127.0.0.1` works
+   because Fargate's `awsvpc` mode gives every container in the task one
+   shared network namespace, same as `localhost` between processes on one
+   host.
+3. Still `ecs_stack.py` — `ecs_task_role` (previously empty, just a trust
+   policy) gets an inline policy via `add_to_policy()` granting exactly
+   what the daemon calls: `xray:PutTraceSegments`, `PutTelemetryRecords`,
+   and the three `GetSampling*` reads the SDK polls for its sampling
+   rules. All five require `Resource: "*"` — the X-Ray API has no
+   resource-level ARNs to scope to, matching the Terraform sibling's
+   `xray_write` policy document exactly.
+
+Why `essential=False` on the daemon: if X-Ray's daemon crashes or can't
+reach its endpoint, that should never be a reason the whole task cycles
+and traffic drops. Tracing is an observability nice-to-have layered on top
+of a working app, not a dependency the app's availability rides on.
+
+VPC endpoint: `cdk/stacks/network_stack.py`'s interface-endpoint loop
+gains a fourth entry, `XRayEndpoint` (`InterfaceVpcEndpointAwsService.XRAY`).
+Same reasoning as Stage 2 — without it, the daemon's calls to the X-Ray
+API would go out via the NAT gateway, the exact path Stage 2 exists to
+avoid for everything else.
+
+cdk-nag note: the new IAM5 finding on `EcsTaskRole/DefaultPolicy` (the
+`Resource: "*"` X-Ray grant) is covered by the same stack-wide
+`add_stack_suppressions` call already documenting the execution role's
+`ecr:GetAuthorizationToken` finding — its reason text was updated to
+describe both sources rather than adding a second suppression call, per
+the KNOWN ISSUE noted in `ecs_stack.py` (per-resource suppressions don't
+reliably stick in this cdk-nag version, stack-wide does).
+
+What Was Achieved in Week 5 (Stages 1–3)
 
 ✔ ECS deployment circuit breaker with automatic rollback (already present,
   confirmed and documented this stage)
-✔ S3 gateway endpoint + 3 interface endpoints (ECR API, ECR Docker
-  registry, CloudWatch Logs)
+✔ S3 gateway endpoint + 4 interface endpoints (ECR API, ECR Docker
+  registry, CloudWatch Logs, X-Ray)
 ✔ Dedicated, VPC-scoped security group for the interface endpoints
+✔ Flask app instrumented end-to-end with AWS X-Ray, daemon sidecar
+  isolated from app availability via `essential=False`
+✔ Least-privilege X-Ray IAM policy on the task role (5 actions, no
+  managed policy)
 ✔ `weeks/` documentation convention established in this repo, matching the
   Terraform sibling
 
-What's Next – Week 5 Stages 3–4
-
-APM via AWS X-Ray: SDK instrumentation in the Flask app (`app/app.py` —
-independent copy from the Terraform sibling's, needs the same change
-applied twice), an X-Ray daemon sidecar in `EcsStack`'s task definition,
-and IAM permissions for the task role to write trace segments.
+What's Next – Week 5 Stage 4
 
 CodeDeploy Blue/Green: a second target group in `EcsStack`, linear traffic
 shifting, and the existing `ObservabilityStack` alarms (`AppErrorRateAlarm`,

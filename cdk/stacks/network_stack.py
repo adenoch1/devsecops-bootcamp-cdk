@@ -110,6 +110,10 @@ class NetworkStack(Stack):
             "EcrApiEndpoint": ec2.InterfaceVpcEndpointAwsService.ECR,
             "EcrDkrEndpoint": ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
             "LogsEndpoint": ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+            # Week 5 Stage 3: the X-Ray daemon sidecar calls the X-Ray API to
+            # ship trace segments — without this it'd go out via the NAT
+            # gateway instead, the one path this whole block exists to avoid.
+            "XRayEndpoint": ec2.InterfaceVpcEndpointAwsService.XRAY,
         }.items():
             self.vpc.add_interface_endpoint(
                 endpoint_id,
