@@ -72,6 +72,37 @@ def handle_unexpected_error(exc):
     return jsonify(status="error"), 500
 
 
+# Week 10: response headers a ZAP baseline scan flagged as missing (see
+# weeks/week-10-dast-zap/README.md for the actual scan output). Safe to set
+# unconditionally: this app serves no third-party resources and no per-user
+# sensitive content, so there's no compatibility cost to a strict policy.
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    # base-uri/form-action/frame-ancestors don't fall back to default-src
+    # per the CSP spec — each needs its own directive or a scanner (rightly)
+    # flags the policy as incomplete.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    )
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    # The cross-origin-isolation trio — COEP alone isn't sufficient without
+    # CORP; browsers expect all three set consistently.
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    # ZAP's HSTS check only flags this over HTTPS, so it didn't fire against
+    # the plain-HTTP container this scan runs against locally/in CI — but
+    # this same code also serves real traffic through the ALB's HTTPS
+    # listener in every deployed environment, where it matters for real.
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
 @app.route("/health")
 def health():
     return jsonify(status="ok"), 200

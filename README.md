@@ -76,6 +76,8 @@ after each lands there. Start with whichever week you're studying:
 - `weeks/week-09-secrets-management/README.md` — real secrets management;
   uses Secrets Manager instead of the Terraform sibling's SSM Parameter
   Store, for a documented CDK-ecosystem reason
+- `weeks/week-10-dast-zap/README.md` — dynamic app security testing (OWASP
+  ZAP), 6 real findings fixed via response headers
 
 **Week 06 (account security baseline) is not ported here, by design.**
 The Terraform sibling's `devsecops-bootcamp/weeks/week-06-security-baseline/README.md`
