@@ -71,6 +71,11 @@ after each lands there. Start with whichever week you're studying:
   endpoints (with an architecture diagram), X-Ray, CodeDeploy Blue/Green
 - `weeks/week-07-secret-scanning/README.md` — Gitleaks, full git history
   scanned on every PR
+- `weeks/week-08-sbom-cosign/README.md` — SBOM (Syft) + keyless image
+  signing (cosign/Sigstore)
+- `weeks/week-09-secrets-management/README.md` — real secrets management;
+  uses Secrets Manager instead of the Terraform sibling's SSM Parameter
+  Store, for a documented CDK-ecosystem reason
 
 **Week 06 (account security baseline) is not ported here, by design.**
 The Terraform sibling's `devsecops-bootcamp/weeks/week-06-security-baseline/README.md`
