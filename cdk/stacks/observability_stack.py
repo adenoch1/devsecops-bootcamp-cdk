@@ -18,8 +18,10 @@ from aws_cdk import (
     aws_ecs as ecs,
     aws_elasticloadbalancingv2 as elbv2,
     aws_wafv2 as wafv2,
+    aws_codedeploy as codedeploy,
 )
 from constructs import Construct
+from cdk_nag import NagSuppressions
 
 import config
 
@@ -36,6 +38,8 @@ class ObservabilityStack(Stack):
         service: ecs.FargateService,
         alb: elbv2.ApplicationLoadBalancer,
         target_group: elbv2.ApplicationTargetGroup,
+        green_target_group: elbv2.ApplicationTargetGroup,
+        listener: elbv2.ApplicationListener,
         web_acl: wafv2.CfnWebACL,
         **kwargs,
     ) -> None:
@@ -69,29 +73,35 @@ class ObservabilityStack(Stack):
 
         # ---- Alarms ----
 
+        # Named separately (not just indexed out of the list below) because
+        # Week 5 Stage 4's CodeDeploy deployment group needs to reference
+        # these two specifically as alarm-gated auto-rollback triggers.
+        app_error_rate_alarm = cw.Alarm(
+            self, "AppErrorRateAlarm",
+            alarm_description="More than 5 application ERROR log lines in 5 minutes.",
+            metric=app_error_metric,
+            threshold=5,
+            evaluation_periods=1,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+        )
+        alb_5xx_alarm = cw.Alarm(
+            self, "Alb5xxAlarm",
+            alarm_description="ALB target 5xx responses exceeded threshold.",
+            metric=alb.metrics.custom(
+                "HTTPCode_Target_5XX_Count",
+                statistic="sum",
+                period=Duration.minutes(5),
+            ),
+            threshold=5,
+            evaluation_periods=1,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+        )
+
         alarms = [
-            cw.Alarm(
-                self, "AppErrorRateAlarm",
-                alarm_description="More than 5 application ERROR log lines in 5 minutes.",
-                metric=app_error_metric,
-                threshold=5,
-                evaluation_periods=1,
-                comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            ),
-            cw.Alarm(
-                self, "Alb5xxAlarm",
-                alarm_description="ALB target 5xx responses exceeded threshold.",
-                metric=alb.metrics.custom(
-                    "HTTPCode_Target_5XX_Count",
-                    statistic="sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=5,
-                evaluation_periods=1,
-                comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            ),
+            app_error_rate_alarm,
+            alb_5xx_alarm,
             cw.Alarm(
                 self, "TargetUnhealthyAlarm",
                 alarm_description="One or more ALB targets are unhealthy.",
@@ -123,6 +133,60 @@ class ObservabilityStack(Stack):
         for alarm in alarms:
             alarm.add_alarm_action(cw_actions.SnsAction(self.alerts_topic))
             alarm.add_ok_action(cw_actions.SnsAction(self.alerts_topic))
+
+        # ---- CodeDeploy Blue/Green (Week 5 Stage 4) ----
+        # Lives here, not in EcsStack, for the same reason it lives at the
+        # env level (not inside the ecs module) on the Terraform sibling:
+        # it needs a cross-stack wire this stack already has (the alarms
+        # above) plus what EcsStack exposes (service, both target groups,
+        # listener). EcsStack is instantiated before this stack specifically
+        # so this wiring is possible.
+
+        codedeploy_app = codedeploy.EcsApplication(
+            self, "CodeDeployApplication",
+            application_name=f"{config.NAME_PREFIX}-app",
+        )
+
+        deployment_group = codedeploy.EcsDeploymentGroup(
+            self, "CodeDeployDeploymentGroup",
+            application=codedeploy_app,
+            deployment_group_name=f"{config.NAME_PREFIX}-dg",
+            service=service,
+            blue_green_deployment_config=codedeploy.EcsBlueGreenDeploymentConfig(
+                blue_target_group=target_group,
+                green_target_group=green_target_group,
+                listener=listener,
+                # Reroute traffic to green as soon as its tasks are
+                # healthy — no manual "continue-deployment" gate. Same
+                # reasoning as the Terraform sibling: no on-call human to
+                # gate on, the alarm-triggered auto-rollback below is what
+                # keeps this safe unattended.
+                termination_wait_time=Duration.minutes(5),
+            ),
+            # Predefined AWS deployment config, referenced by name — CDK
+            # has no named constant for this one (only ALL_AT_ONCE is a
+            # static member; canary/linear configs are referenced by their
+            # AWS-predefined name), same config the Terraform sibling uses.
+            deployment_config=codedeploy.EcsDeploymentConfig.from_ecs_deployment_config_name(
+                self, "LinearDeploymentConfig",
+                "CodeDeployDefault.ECSLinear10PercentEvery1Minutes",
+            ),
+            auto_rollback=codedeploy.AutoRollbackConfig(
+                failed_deployment=True,
+                deployment_in_alarm=True,
+            ),
+            alarms=[app_error_rate_alarm, alb_5xx_alarm],
+        )
+        NagSuppressions.add_resource_suppressions(
+            deployment_group,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": "EcsDeploymentGroup auto-creates its CodeDeploy service role with AWSCodeDeployRoleForECS, the AWS-documented standard managed policy for ECS blue/green deployment groups — same policy the Terraform sibling's hand-rolled codedeploy IAM role attaches.",
+                },
+            ],
+            apply_to_children=True,
+        )
 
         # ---- Dashboard ----
 
