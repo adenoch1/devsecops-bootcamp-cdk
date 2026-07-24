@@ -70,6 +70,18 @@ after each lands there. Start with whichever week you're studying:
 - `weeks/week-05-progressive-delivery/README.md` — rollback parity, VPC
   endpoints (with an architecture diagram), X-Ray, CodeDeploy Blue/Green
 
+**Week 06 (account security baseline) is not ported here, by design.**
+The Terraform sibling's `devsecops-bootcamp/weeks/week-06-security-baseline/README.md`
+enables GuardDuty, Security Hub, and AWS Config — all three are AWS
+account+region *singletons* (exactly one GuardDuty detector, one Security
+Hub subscription, one Config recorder per account per region, full stop).
+A second `aws_guardduty_detector` from a CDK stack here wouldn't
+duplicate that setup, it would conflict with it. That account-wide
+baseline, enabled once via the Terraform repo's bootstrap, already
+monitors every resource in the account — including this repo's ECS
+service, S3 buckets, and IAM roles — regardless of which IaC tool
+deployed them.
+
 ## Terraform → CDK mapping
 
 | Terraform module | CDK stack | Notes |
