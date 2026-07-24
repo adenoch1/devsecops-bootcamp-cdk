@@ -25,6 +25,7 @@ from aws_cdk import (
     Duration,
     RemovalPolicy,
     CfnOutput,
+    Annotations,
     aws_ec2 as ec2,
     aws_ecs as ecs,
     aws_elasticloadbalancingv2 as elbv2,
@@ -170,8 +171,36 @@ class EcsStack(Stack):
         )
         self.alb.log_access_logs(alb_logs_bucket, prefix="alb-access")
 
+        # "Blue" target group (Week 5 Stage 4 terminology) — attribute name
+        # kept as `target_group` rather than renamed to `blue_target_group`,
+        # matching the Terraform sibling's reasoning for not renaming its
+        # `aws_lb_target_group.app` resource: this is where the listener's
+        # default action points on initial creation; CodeDeploy takes over
+        # routing between this and `green_target_group` on every deployment
+        # after that.
         self.target_group = elbv2.ApplicationTargetGroup(
             self, "TargetGroup",
+            vpc=vpc,
+            port=config.APP_PORT,
+            protocol=elbv2.ApplicationProtocol.HTTP,
+            target_type=elbv2.TargetType.IP,
+            deregistration_delay=Duration.seconds(30),
+            health_check=elbv2.HealthCheck(
+                path=config.HEALTH_CHECK_PATH,
+                healthy_http_codes="200-399",
+                interval=Duration.seconds(30),
+                timeout=Duration.seconds(5),
+                healthy_threshold_count=3,
+                unhealthy_threshold_count=3,
+            ),
+        )
+
+        # "Green" target group (Week 5 Stage 4) — CodeDeploy registers each
+        # new deployment's tasks here first, health-checks them, then shifts
+        # listener traffic from blue to green. Identical shape to the blue
+        # target group.
+        self.green_target_group = elbv2.ApplicationTargetGroup(
+            self, "GreenTargetGroup",
             vpc=vpc,
             port=config.APP_PORT,
             protocol=elbv2.ApplicationProtocol.HTTP,
@@ -470,6 +499,32 @@ class EcsStack(Stack):
 
         # ---- Service ----
 
+        # Week 5 Stage 4: deployment_controller=CODE_DEPLOY replaces
+        # min_healthy_percent/max_healthy_percent/circuit_breaker — all
+        # three only apply to ECS's own rolling-update controller and are
+        # either meaningless or outright rejected once CodeDeploy owns the
+        # rollout. Not a capability regression: CodeDeploy's
+        # auto_rollback_configuration (ObservabilityStack) covers the same
+        # failed-deployment case the circuit breaker did, plus the new
+        # alarm-triggered case it never could.
+        #
+        # Unlike the Terraform sibling, no CDK-side equivalent of
+        # `lifecycle.ignore_changes` is needed here or on the listener
+        # below. Two different reasons: (1) CloudFormation has documented,
+        # built-in special-case behavior for `AWS::ECS::Service` with
+        # `DeploymentController.Type=CODE_DEPLOY` — it does not attempt to
+        # reconcile TaskDefinition/LoadBalancers on stack updates the way
+        # Terraform's plan/apply refresh cycle does. (2) More fundamentally,
+        # CloudFormation change sets are computed by diffing the new
+        # template against CloudFormation's own stored record of the last-
+        # deployed template, not by re-reading the live resource's current
+        # AWS state first (that's a separate, manually-invoked feature —
+        # "drift detection" — precisely because CFN doesn't do this by
+        # default). Terraform's `-refresh=true` plan step does read live
+        # state first, which is exactly what caused the real outage this
+        # session on the Terraform side: it saw CodeDeploy's live listener
+        # change as drift and "corrected" it back. CloudFormation has
+        # nothing to notice here in the first place.
         self.service = ecs.FargateService(
             self, "Service",
             service_name=f"{config.NAME_PREFIX}-svc",
@@ -479,12 +534,21 @@ class EcsStack(Stack):
             security_groups=[self.ecs_sg],
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             assign_public_ip=False,
-            min_healthy_percent=100,
-            max_healthy_percent=200,
             health_check_grace_period=Duration.seconds(60),
-            circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
+            deployment_controller=ecs.DeploymentController(
+                type=ecs.DeploymentControllerType.CODE_DEPLOY
+            ),
         )
         self.service.attach_to_application_target_group(self.target_group)
+
+        # Acknowledges the "minHealthyPercent has not been configured"
+        # warning cdk synth prints for this construct — deliberately not
+        # set (see the comment above this service), since it's an ECS-
+        # native-rolling-update field this CODE_DEPLOY-controlled service
+        # doesn't use.
+        Annotations.of(self.service).acknowledge_warning(
+            "@aws-cdk/aws-ecs:minHealthyPercent"
+        )
 
         # Applied last (by exact path, not apply_to_children) so it targets
         # the DefaultPolicy created by the ECR-pull and log-write grants
