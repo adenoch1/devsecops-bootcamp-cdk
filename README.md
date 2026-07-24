@@ -78,6 +78,9 @@ after each lands there. Start with whichever week you're studying:
   Store, for a documented CDK-ecosystem reason
 - `weeks/week-10-dast-zap/README.md` — dynamic app security testing (OWASP
   ZAP), 6 real findings fixed via response headers
+- `weeks/week-11-threat-model/README.md` — why the written threat model
+  isn't duplicated here, and the one real CDK-specific caveat worth
+  naming (design-verified vs. run-verified)
 
 **Week 06 (account security baseline) is not ported here, by design.**
 The Terraform sibling's `devsecops-bootcamp/weeks/week-06-security-baseline/README.md`
