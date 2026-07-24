@@ -50,3 +50,22 @@ jobs:
           ignore-unfixed: true
           vuln-type: "os,library"
           severity: "HIGH,CRITICAL"
+
+  gitleaks:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Full history, not just the PR diff -- a secret committed and later
+      # "removed" in a follow-up commit still exists in history and is
+      # still a real leak. fetch-depth: 0 is required for gitleaks to see
+      # past commits at all.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks (secret scanning)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # Free for public repos (this one) -- a license is only required
+          # for private repos under a GitHub organization account.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

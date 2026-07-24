@@ -69,6 +69,8 @@ after each lands there. Start with whichever week you're studying:
 
 - `weeks/week-05-progressive-delivery/README.md` — rollback parity, VPC
   endpoints (with an architecture diagram), X-Ray, CodeDeploy Blue/Green
+- `weeks/week-07-secret-scanning/README.md` — Gitleaks, full git history
+  scanned on every PR
 
 ## Terraform → CDK mapping
 
