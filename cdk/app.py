@@ -39,6 +39,8 @@ observability_stack = ObservabilityStack(
     service=ecs_stack.service,
     alb=ecs_stack.alb,
     target_group=ecs_stack.target_group,
+    green_target_group=ecs_stack.green_target_group,
+    listener=ecs_stack.listener,
     web_acl=ecs_stack.web_acl,
 )
 

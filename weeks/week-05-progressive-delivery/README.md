@@ -52,13 +52,20 @@ group yourself.
 ```mermaid
 graph TB
     Client["Client / Browser"]
+    CodeDeploy["CodeDeploy<br/>(deployment group)"]
+    Alarms["CloudWatch Alarms<br/>(AppErrorRateAlarm, Alb5xxAlarm)"]
 
     subgraph VPC["VPC 192.168.0.0/16"]
         IGW["Internet Gateway"]
 
         subgraph Public["Public Subnets (2 AZs)"]
-            ALB["Application Load Balancer<br/>+ WAFv2 (3 managed rule groups)"]
+            ALB["Application Load Balancer<br/>HTTPS listener"]
             NAT["NAT Gateway"]
+        end
+
+        subgraph TGs["Target Groups (Stage 4)"]
+            BlueTG["Blue TG<br/>(current live)"]
+            GreenTG["Green TG<br/>(new deployment)"]
         end
 
         subgraph Private["Private Subnets (2 AZs)"]
@@ -83,7 +90,13 @@ graph TB
 
     Client -->|"HTTPS 443"| IGW
     IGW --> ALB
-    ALB -->|"app port"| App
+    ALB -->|"linear traffic shift<br/>10% / 1 min"| BlueTG
+    ALB -.->|"shifts here during<br/>a deployment"| GreenTG
+    BlueTG --> App
+    GreenTG -.-> App
+
+    CodeDeploy -.->|"registers new task set,<br/>flips ALB routing"| GreenTG
+    Alarms -.->|"deployment_in_alarm<br/>= auto-rollback"| CodeDeploy
 
     App -.->|"UDP 2000<br/>(same task,<br/>shared network ns)"| XrayD
 
@@ -97,6 +110,8 @@ graph TB
     style Endpoints fill:#e0e7ff,stroke:#3730a3
     style NAT fill:#fef3c7,stroke:#b45309
     style XrayD fill:#dcfce7,stroke:#15803d
+    style TGs fill:#fce7f3,stroke:#a21caf
+    style CodeDeploy fill:#fce7f3,stroke:#a21caf
 ```
 
 Solid arrows: traffic that now stays inside the VPC via an endpoint.
@@ -152,10 +167,70 @@ describe both sources rather than adding a second suppression call, per
 the KNOWN ISSUE noted in `ecs_stack.py` (per-resource suppressions don't
 reliably stick in this cdk-nag version, stack-wide does).
 
-What Was Achieved in Week 5 (Stages 1–3)
+Stage 4 — CodeDeploy Blue/Green
 
-✔ ECS deployment circuit breaker with automatic rollback (already present,
-  confirmed and documented this stage)
+What changed: `cdk/stacks/ecs_stack.py` gains a second target group
+(`green_target_group`, identical shape to the existing `target_group`).
+`FargateService` drops `circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True)`
+(Stage 1) in favor of `deployment_controller=ecs.DeploymentController(type=CODE_DEPLOY)`,
+and also drops the `min_healthy_percent`/`max_healthy_percent` rolling-
+update settings — both meaningless once CodeDeploy, not ECS's own
+controller, owns the rollout. `cdk/stacks/observability_stack.py` gains
+the actual CodeDeploy resources: `codedeploy.EcsApplication` +
+`codedeploy.EcsDeploymentGroup`, referencing `EcsStack`'s service and both
+target groups plus this stack's own `AppErrorRateAlarm`/`Alb5xxAlarm` —
+living here for the same cross-stack-wiring reason the Terraform
+sibling's equivalent lives at the env level rather than inside the `ecs`
+module.
+
+Traffic shift and rollback are configured identically to the Terraform
+sibling: `CodeDeployDefault.ECSLinear10PercentEvery1Minutes` (referenced
+by name — CDK has no named constant for the canary/linear predefined AWS
+configs, only `ALL_AT_ONCE`; `EcsDeploymentConfig.from_ecs_deployment_config_name`
+is how you reference a predefined one), `auto_rollback` enabled for both
+`failed_deployment` and `deployment_in_alarm`, `alarms=[app_error_rate_alarm,
+alb_5xx_alarm]`, and `termination_wait_time=Duration.minutes(5)` with no
+manual continue-deployment gate — full automation, no on-call human to
+gate on.
+
+**The most interesting difference from the Terraform port, and worth
+understanding well**: the Terraform sibling needed
+`lifecycle.ignore_changes` on *both* the ECS service (`task_definition`,
+`load_balancer`) *and* the ALB listener (`default_action`) — missing the
+listener one caused a real production outage that session (a later
+`terraform apply` reset the listener back to Terraform's stale config,
+undoing what CodeDeploy had legitimately done). **Neither is needed here,
+for two different reasons**:
+
+1. CloudFormation has documented, built-in special-case behavior for
+   `AWS::ECS::Service` with `DeploymentController.Type=CODE_DEPLOY` — it
+   does not try to reconcile `TaskDefinition`/`LoadBalancers` on stack
+   updates, full stop. This part has a direct Terraform analogue
+   (`ignore_changes`), just implemented natively instead of manually.
+2. The listener has no CloudFormation equivalent of `ignore_changes` —
+   and doesn't need one, because CloudFormation change sets are computed
+   by diffing the new template against CloudFormation's *own stored
+   record* of the last-deployed template, not by re-reading the listener's
+   *live* AWS state first. Terraform's `-refresh=true` plan step does read
+   live state first — that refresh is exactly what saw CodeDeploy's
+   change as "drift" and "corrected" it, causing the outage. CloudFormation
+   has nothing to notice here in the first place; "drift detection" is a
+   separate, manually-invoked CloudFormation feature precisely because
+   this isn't automatic. Same end result (the listener survives
+   redeployment untouched), structurally different reason — a genuinely
+   interesting difference between the two tools' change-management models,
+   not just a syntax difference.
+
+cdk-nag note: `EcsDeploymentGroup` auto-creates its CodeDeploy service
+role with the AWS-managed `AWSCodeDeployRoleForECS` policy, flagged
+IAM4 — suppressed with the same reasoning already used for the ECS task
+execution role's managed policy (AWS's own documented standard for this
+exact purpose).
+
+What Was Achieved in Week 5 (all 4 stages)
+
+✔ ECS deployment circuit breaker with automatic rollback (Stage 1),
+  superseded by CodeDeploy's stronger, alarm-aware rollback (Stage 4)
 ✔ S3 gateway endpoint + 4 interface endpoints (ECR API, ECR Docker
   registry, CloudWatch Logs, X-Ray)
 ✔ Dedicated, VPC-scoped security group for the interface endpoints
@@ -163,11 +238,12 @@ What Was Achieved in Week 5 (Stages 1–3)
   isolated from app availability via `essential=False`
 ✔ Least-privilege X-Ray IAM policy on the task role (5 actions, no
   managed policy)
+✔ Real CodeDeploy blue/green traffic shifting, alarm-gated automatic
+  rollback wired to the Week 4 alarms — full parity with the Terraform
+  sibling's live-verified Stage 4, including a documented explanation of
+  why the two tools' change-management models handle the listener
+  differently
 ✔ `weeks/` documentation convention established in this repo, matching the
   Terraform sibling
 
-What's Next – Week 5 Stage 4
-
-CodeDeploy Blue/Green: a second target group in `EcsStack`, linear traffic
-shifting, and the existing `ObservabilityStack` alarms (`AppErrorRateAlarm`,
-`Alb5xxAlarm`) wired as automatic-rollback triggers *during* the shift.
+Week 5 is complete in both repos.
