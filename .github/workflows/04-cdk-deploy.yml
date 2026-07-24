@@ -81,13 +81,57 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push
+        id: build
         env:
           REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           REPOSITORY: devsecops-flask-dev-cdk-repo
           IMAGE_TAG: ${{ github.sha }}
         run: |
+          set -euo pipefail
           docker build -f docker/Dockerfile -t "$REGISTRY/$REPOSITORY:$IMAGE_TAG" .
           docker push "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+
+          # Plain docker CLI (not buildx/build-push-action) doesn't expose
+          # a digest output the way the Terraform sibling's action-based
+          # build does -- read it back from the image that was just pushed.
+          DIGEST_REF="$(docker inspect --format='{{index .RepoDigests 0}}' "$REGISTRY/$REPOSITORY:$IMAGE_TAG")"
+          echo "digest_ref=$DIGEST_REF" >> "$GITHUB_OUTPUT"
+
+      # Week 8 (CDK port): SBOM + cosign, same as the Terraform sibling's
+      # 03-release.yml. Signed/attested once by digest -- covers the tag
+      # pushed above too, since they're the same manifest.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Generate SBOM (Syft, SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          image: "${{ steps.build.outputs.digest_ref }}"
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: true
+          upload-release-assets: false
+
+      - name: Attach SBOM as an in-toto attestation
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate sbom.spdx.json \
+            "${{ steps.build.outputs.digest_ref }}"
+
+      - name: Sign the image (keyless, Sigstore)
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${{ steps.build.outputs.digest_ref }}"
+
+      - name: Verify the signature (sanity check, fails the build if signing didn't actually take)
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/adenoch1/devsecops-bootcamp-cdk/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ steps.build.outputs.digest_ref }}"
 
   deploy-app:
     if: ${{ inputs.action == 'deploy' }}
