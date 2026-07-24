@@ -9,6 +9,16 @@ import sys
 
 app = Flask(__name__)
 
+# Flask's own session/CSRF-signing key — the one secret every real Flask
+# app has, whether or not it's actively using sessions yet. Injected via
+# ECS's native `secrets` container-definition field (Week 9), which pulls
+# straight from SSM Parameter Store (SecureString, KMS-encrypted) into the
+# task's environment at startup — the value never touches the CDK template,
+# CloudFormation, or application code. The literal fallback here only ever
+# runs locally: every real deployment always sets FLASK_SECRET_KEY, so
+# this default is never reachable outside a laptop.
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "local-dev-only-not-a-real-secret")
+
 # Build/deploy metadata injected by CI as env vars (see CDK stack / workflow).
 # Defaults keep local runs working without any setup.
 BUILD_INFO = {

@@ -36,6 +36,7 @@ from aws_cdk import (
     aws_logs as logs,
     aws_kinesisfirehose as firehose,
     aws_certificatemanager as acm,
+    aws_secretsmanager as secretsmanager,
 )
 from constructs import Construct
 from cdk_nag import NagSuppressions, NagPackSuppression
@@ -450,6 +451,57 @@ class EcsStack(Stack):
             ecs.PortMapping(container_port=2000, protocol=ecs.Protocol.UDP)
         )
 
+        # ---- Week 9: real secrets management ----
+        # Flask's own session/CSRF-signing key — the first genuinely non-
+        # contrived secret in this project (every env var above is
+        # legitimately non-sensitive build metadata).
+        #
+        # Secrets Manager, not SSM Parameter Store, despite the Terraform
+        # sibling using SSM — a deliberate, documented CDK-ecosystem
+        # difference, not a shortcut: CDK's `ssm.StringParameter` L2
+        # construct (confirmed by inspecting its constructor) has no way to
+        # create a `SecureString` at all; only the plaintext `String` type.
+        # Achieving "generate the secret once, keep it stable across
+        # redeploys" with real SSM SecureStrings from CDK would need a
+        # custom Lambda-backed resource. `secretsmanager.Secret` gives that
+        # exact behavior natively via `generate_secret_string` — generated
+        # once at creation, untouched by subsequent `cdk deploy` runs.
+        # Honest cost note: Secrets Manager bills ~$0.40/secret/month:
+        # a real, small cost the Terraform sibling's SSM standard-tier
+        # parameter doesn't have (SSM standard parameters are free; you
+        # only pay for the KMS key either way).
+        flask_secret_kms_key = kms.Key(
+            self, "FlaskSecretKmsKey",
+            description="KMS CMK for the Flask session-signing secret (Week 9)",
+            enable_key_rotation=True,
+            alias=f"{config.NAME_PREFIX}-flask-secret",
+            removal_policy=RemovalPolicy.DESTROY,
+            pending_window=Duration.days(7),
+        )
+        flask_secret = secretsmanager.Secret(
+            self, "FlaskSecretKey",
+            secret_name=f"{config.NAME_PREFIX}-flask-secret-key",
+            encryption_key=flask_secret_kms_key,
+            generate_secret_string=secretsmanager.SecretStringGenerator(
+                exclude_punctuation=False,
+                password_length=64,
+            ),
+        )
+        NagSuppressions.add_resource_suppressions(
+            flask_secret,
+            [
+                {
+                    "id": "AwsSolutions-SMG4",
+                    "reason": "No AWS-provided rotation Lambda template exists for a generic application signing key (unlike RDS/DocumentDB credentials, which have built-in templates) — a real rotation Lambda would need to be hand-written here. More fundamentally, ECS tasks only read `secrets` values once at container startup, not live, so meaningful rotation would also require coordinating an ECS service redeploy as part of the rotation Lambda's post-rotation step. Disproportionate complexity for a key no route in this app currently uses for anything session-dependent.",
+                }
+            ],
+        )
+        # Grants secretsmanager:GetSecretValue/DescribeSecret + the
+        # matching KMS decrypt in one call — the execution role fetches
+        # and decrypts this before the container starts, same division of
+        # responsibility as the Terraform sibling's execution-role policy.
+        flask_secret.grant_read(self.ecs_task_execution_role)
+
         container = self.task_definition.add_container(
             "app",
             image=ecs.ContainerImage.from_ecr_repository(
@@ -471,6 +523,9 @@ class EcsStack(Stack):
                 "PYTHONPYCACHEPREFIX": "/tmp/pycache",
                 "AWS_XRAY_DAEMON_ADDRESS": "127.0.0.1:2000",
             },
+            secrets={
+                "FLASK_SECRET_KEY": ecs.Secret.from_secrets_manager(flask_secret),
+            },
         )
         container.add_port_mappings(ecs.PortMapping(container_port=config.APP_PORT))
         container.add_container_dependencies(
@@ -483,7 +538,7 @@ class EcsStack(Stack):
             [
                 {
                     "id": "AwsSolutions-ECS2",
-                    "reason": "All environment variables here are non-sensitive build/deploy metadata (git SHA, image tag, build time, service/env name) and runtime tuning flags — no credentials or secrets. Nothing here would benefit from Secrets Manager/SSM.",
+                    "reason": "All plaintext environment variables here are non-sensitive build/deploy metadata (git SHA, image tag, build time, service/env name) and runtime tuning flags — no credentials or secrets. The one genuine secret (Flask's session-signing key, Week 9) is deliberately not in this list — it's injected via the `secrets` field above (Secrets Manager), which is exactly what this check exists to require.",
                 }
             ],
         )
