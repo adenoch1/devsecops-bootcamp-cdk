@@ -1,0 +1,52 @@
+name: DAST (ZAP Baseline)
+
+on:
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  zap-baseline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image under test
+        run: docker build -f docker/Dockerfile -t scan-target:ci .
+
+      # Scans a locally-run copy of the exact image this pipeline builds and
+      # pushes -- not the live deployed app. Passive-only (baseline, not a
+      # full active scan): safe to run on every PR, no live AWS dependency,
+      # no risk of tripping the real app's WAF/GuardDuty/CloudWatch alarms
+      # the way scanning the actual production ALB would.
+      - name: Run container under test
+        run: docker run -d --name app-under-test -p 5000:5000 scan-target:ci
+
+      - name: Wait for app to become healthy
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:5000/health >/dev/null; then
+              echo "App is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::App never became healthy"
+          docker logs app-under-test
+          exit 1
+
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.15.0
+        with:
+          target: "http://localhost:5000"
+          rules_file_name: ".zap/rules.tsv"
+          fail_action: true
+          allow_issue_writing: false
+
+      - name: Stop container under test
+        if: always()
+        run: docker rm -f app-under-test || true
